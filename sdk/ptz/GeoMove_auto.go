@@ -7,9 +7,9 @@ package ptz
 import (
 	"context"
 	"github.com/juju/errors"
-	"github.com/use-go/onvif"
-	"github.com/use-go/onvif/sdk"
-	"github.com/use-go/onvif/ptz"
+	"github.com/mydragonfly00/onvif"
+	"github.com/mydragonfly00/onvif/ptz"
+	"github.com/mydragonfly00/onvif/sdk"
 )
 
 // Call_GeoMove forwards the call to dev.CallMethod() then parses the payload of the reply as a GeoMoveResponse.

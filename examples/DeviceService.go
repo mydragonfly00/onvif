@@ -6,10 +6,10 @@ import (
 	"log"
 	"net/http"
 
-	goonvif "github.com/use-go/onvif"
-	"github.com/use-go/onvif/device"
-	sdk "github.com/use-go/onvif/sdk/device"
-	"github.com/use-go/onvif/xsd/onvif"
+	goonvif "github.com/mydragonfly00/onvif"
+	"github.com/mydragonfly00/onvif/device"
+	sdk "github.com/mydragonfly00/onvif/sdk/device"
+	"github.com/mydragonfly00/onvif/xsd/onvif"
 )
 
 const (

@@ -1,19 +1,22 @@
 package onvif
 
 import (
+	"bytes"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/beevik/etree"
+	"github.com/icholy/digest"
 	"github.com/mydragonfly00/onvif/device"
 	"github.com/mydragonfly00/onvif/gosoap"
-	"github.com/mydragonfly00/onvif/networking"
 	wsdiscovery "github.com/mydragonfly00/onvif/ws-discovery"
 )
 
@@ -45,6 +48,16 @@ const (
 	NVS
 	NVA
 	NVT
+	ContentType = "Content-Type"
+)
+
+type AuthMode int
+
+// ONVIF authentication modes
+const (
+	AuthModeNone AuthMode = iota
+	AuthModeDigest
+	AuthModeWSSecurity
 )
 
 func (devType DeviceType) String() string {
@@ -76,12 +89,13 @@ type DeviceInfo struct {
 //struct represents an abstract ONVIF device.
 //It contains methods, which helps to communicate with ONVIF device
 type Device struct {
-	params    DeviceParams
+	Params    DeviceParams
 	endpoints map[string]string
 	info      DeviceInfo
 }
 
 type DeviceParams struct {
+	AuthMode
 	Xaddr      string
 	Username   string
 	Password   string
@@ -171,20 +185,27 @@ func (dev *Device) getSupportedServices(resp *http.Response) error {
 //NewDevice function construct a ONVIF Device entity
 func NewDevice(params DeviceParams) (*Device, error) {
 	dev := new(Device)
-	dev.params = params
+	dev.Params = params
 	dev.endpoints = make(map[string]string)
-	dev.addEndpoint("Device", "http://"+dev.params.Xaddr+"/onvif/device_service")
+	dev.addEndpoint("Device", "http://"+dev.Params.Xaddr+"/onvif/device_service")
 
-	if dev.params.HttpClient == nil {
-		dev.params.HttpClient = new(http.Client)
+	if dev.Params.HttpClient == nil {
+		dev.Params.HttpClient = new(http.Client)
+		dev.Params.HttpClient.Timeout = time.Minute * 1
 	}
 
 	getCapabilities := device.GetCapabilities{Category: "All"}
 
 	resp, err := dev.CallMethod(getCapabilities)
 
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+	}()
+
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return nil, errors.New("camera is not available at " + dev.params.Xaddr + " or it does not support ONVIF services")
+		return nil, errors.New("camera is not available at " + dev.Params.Xaddr + " or it does not support ONVIF services")
 	}
 
 	err = dev.getSupportedServices(resp)
@@ -202,7 +223,7 @@ func (dev *Device) addEndpoint(Key, Value string) {
 
 	// Replace host with host from device params.
 	if u, err := url.Parse(Value); err == nil {
-		u.Host = dev.params.Xaddr
+		u.Host = dev.Params.Xaddr
 		Value = u.String()
 	}
 
@@ -279,9 +300,68 @@ func (dev Device) callMethodDo(endpoint string, method interface{}) (*http.Respo
 	soap.AddAction()
 
 	//Auth Handling
-	if dev.params.Username != "" && dev.params.Password != "" {
-		soap.AddWSSecurity(dev.params.Username, dev.params.Password)
+	//if dev.Params.Username != "" && dev.Params.Password != "" {
+	//	soap.AddWSSecurity(dev.Params.Username, dev.Params.Password)
+	//}
+	//
+	//return networking.SendSoap(dev.Params.HttpClient, endpoint, soap.String())
+	return dev.SendSoap(endpoint, soap)
+}
+
+func (dev Device) SendSoap(endpoint string, soap gosoap.SoapMessage) (*http.Response, error) {
+	if dev.Params.HttpClient == nil {
+		dev.Params.HttpClient = &http.Client{}
 	}
 
-	return networking.SendSoap(dev.params.HttpClient, endpoint, soap.String())
+	if dev.Params.Username != "" && dev.Params.Password != "" {
+		switch dev.Params.AuthMode {
+		case AuthModeNone:
+		case AuthModeWSSecurity:
+			soap.AddWSSecurity(dev.Params.Username, dev.Params.Password)
+		case AuthModeDigest:
+			if _, ok := dev.Params.HttpClient.Transport.(*digest.Transport); !ok {
+				dev.Params.HttpClient.Transport = &digest.Transport{Username: dev.Params.Username, Password: dev.Params.Password}
+			}
+		default:
+			return nil, fmt.Errorf("invalid SecurityType: %d", dev.Params.AuthMode)
+		}
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBufferString(soap.String()))
+	if err != nil {
+		return nil, fmt.Errorf("could not create http request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/soap+xml")
+
+	// send request
+	soapResp, err := dev.Params.HttpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("could not POST request: %w", err)
+	}
+	//defer soapResp.Body.Close()
+
+	if soapResp.StatusCode == http.StatusUnauthorized {
+		if dev.Params.AuthMode != AuthModeDigest && dev.Params.Username != "" && dev.Params.Password != "" {
+			dev.Params.AuthMode = AuthModeDigest
+			if _, ok := dev.Params.HttpClient.Transport.(*digest.Transport); !ok {
+				// replay request to save digest headers
+				d := &digest.Transport{Transport: &fakeTransport{resp: soapResp}, Username: dev.Params.Username, Password: dev.Params.Password}
+				d.RoundTrip(httpReq)
+				d.Transport = nil
+				dev.Params.HttpClient.Transport = d
+			}
+			return dev.SendSoap(endpoint, soap)
+		}
+		return nil, errors.New(soapResp.Status)
+	}
+
+	return soapResp, nil
+}
+
+type fakeTransport struct {
+	resp *http.Response
+}
+
+func (f *fakeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f.resp, nil
 }
